@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+
+from app.core.logging import get_logger
+from app.schemas.location import LocationIngest, LocationQueueItem
+
+logger = get_logger(__name__)
+
+
+@dataclass(slots=True, frozen=True)
+class QueuedLocation:
+    user_id: str
+    payload: LocationQueueItem
+
+
+class LocationQueueFull(Exception):
+    pass
+
+
+class LocationIngestionService:
+    def __init__(self, queue) -> None:
+        self.queue = queue
+
+    async def enqueue(self, *, user_id: str, payload: LocationIngest) -> None:
+        item = QueuedLocation(
+            user_id=user_id,
+            payload=LocationQueueItem(
+                user_id=user_id,
+                device_id=payload.device_id,
+                latitude=payload.latitude,
+                longitude=payload.longitude,
+                timestamp=payload.timestamp,
+            ),
+        )
+        try:
+            self.queue.put_nowait(item)
+        except asyncio.QueueFull as exc:
+            raise LocationQueueFull from exc
+
+    async def enqueue_batch(self, *, user_id: str, payloads: list[LocationIngest]) -> tuple[int, int]:
+        accepted = 0
+        rejected = 0
+        for payload in payloads:
+            try:
+                await self.enqueue(user_id=user_id, payload=payload)
+                accepted += 1
+            except LocationQueueFull:
+                rejected += 1
+        return accepted, rejected
+
+
+import asyncio
