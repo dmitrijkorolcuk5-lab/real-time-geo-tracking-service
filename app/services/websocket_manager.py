@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from fastapi import WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 
 from app.core.logging import get_logger
 
@@ -40,6 +41,7 @@ class WebsocketManager:
         session.sender_task = asyncio.create_task(self._session_sender(session))
         async with self._lock:
             self._sessions[user_id].add(session)
+        logger.info("websocket connected user_id=%s active_sessions=%s", user_id, self.active_session_count(user_id))
         return session
 
     async def disconnect(self, session: ManagedSession) -> None:
@@ -58,6 +60,7 @@ class WebsocketManager:
                     self._sessions.pop(session.user_id, None)
         with contextlib.suppress(Exception):
             await session.websocket.close()
+        logger.info("websocket disconnected user_id=%s active_sessions=%s", session.user_id, self.active_session_count(session.user_id))
 
     async def broadcast_location(self, user_id: str, payload: dict) -> None:
         await self._broadcast(user_id, payload, alert=False)
@@ -73,10 +76,15 @@ class WebsocketManager:
             try:
                 queue.put_nowait(payload)
             except asyncio.QueueFull:
-                if not alert:
-                    with contextlib.suppress(asyncio.QueueEmpty):
-                        queue.get_nowait()
-                        queue.put_nowait(payload)
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                try:
+                    queue.put_nowait(payload)
+                except asyncio.QueueFull:
+                    if alert:
+                        logger.warning("dropped websocket alert due to full queue user_id=%s", user_id)
+                    else:
+                        logger.warning("dropped stale websocket location update user_id=%s", user_id)
 
     async def _session_sender(self, session: ManagedSession) -> None:
         try:
@@ -86,12 +94,12 @@ class WebsocketManager:
                         payload = session.alert_queue.get_nowait()
                     except asyncio.QueueEmpty:
                         break
-                    await session.websocket.send_json(payload)
+                    await session.websocket.send_json(jsonable_encoder(payload))
                 try:
                     payload = await asyncio.wait_for(session.update_queue.get(), timeout=0.25)
                 except asyncio.TimeoutError:
                     continue
-                await session.websocket.send_json(payload)
+                await session.websocket.send_json(jsonable_encoder(payload))
         except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
             pass
         except Exception:
@@ -101,6 +109,3 @@ class WebsocketManager:
 
     def active_session_count(self, user_id: str) -> int:
         return len(self._sessions.get(user_id, set()))
-
-
-import contextlib

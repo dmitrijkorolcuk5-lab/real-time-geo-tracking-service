@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=float, default=3.0)
     parser.add_argument("--api-url", type=str, default="http://localhost:8000")
     parser.add_argument("--user-id", type=str, default="load-test-user")
+    parser.add_argument("--concurrency", type=int, default=20)
     return parser.parse_args()
 
 
@@ -67,11 +68,23 @@ async def send_batch(client: httpx.AsyncClient, api_url: str, user_id: str, batc
     return response.status_code < 400
 
 
+async def send_batch_limited(
+    semaphore: asyncio.Semaphore,
+    client: httpx.AsyncClient,
+    api_url: str,
+    user_id: str,
+    batch: list[DeviceState],
+) -> bool:
+    async with semaphore:
+        return await send_batch(client, api_url, user_id, batch)
+
+
 async def run_generator(args: argparse.Namespace) -> None:
     devices = build_devices(args.devices)
     total_sent = 0
     total_failed = 0
     tick = 0
+    semaphore = asyncio.Semaphore(max(1, args.concurrency))
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
             tick += 1
@@ -82,7 +95,7 @@ async def run_generator(args: argparse.Namespace) -> None:
             failures = 0
             tasks = []
             for batch in chunked(devices, args.batch_size):
-                tasks.append(send_batch(client, args.api_url, args.user_id, batch))
+                tasks.append(asyncio.create_task(send_batch_limited(semaphore, client, args.api_url, args.user_id, batch)))
             for result in await asyncio.gather(*tasks, return_exceptions=True):
                 requests += 1
                 if isinstance(result, Exception) or result is False:

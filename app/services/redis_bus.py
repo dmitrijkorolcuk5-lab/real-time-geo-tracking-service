@@ -4,6 +4,10 @@ import json
 
 from redis.asyncio import Redis
 
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class RedisBus:
     channel_name = "geo:events"
@@ -12,7 +16,11 @@ class RedisBus:
         self.redis = redis
 
     async def publish(self, event: dict) -> None:
-        await self.redis.publish(self.channel_name, json.dumps(event, default=str))
+        try:
+            await self.redis.publish(self.channel_name, json.dumps(event, default=str))
+        except Exception:
+            logger.exception("redis publish failed channel=%s event_type=%s", self.channel_name, event.get("event_type"))
+            raise
 
     async def close(self) -> None:
         close = getattr(self.redis, "aclose", None)

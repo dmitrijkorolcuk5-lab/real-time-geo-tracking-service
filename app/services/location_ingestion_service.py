@@ -36,7 +36,9 @@ class LocationIngestionService:
         )
         try:
             self.queue.put_nowait(item)
+            logger.debug("accepted location update user_id=%s device_id=%s", user_id, payload.device_id)
         except asyncio.QueueFull as exc:
+            logger.warning("rejected location update due to full queue user_id=%s device_id=%s", user_id, payload.device_id)
             raise LocationQueueFull from exc
 
     async def enqueue_batch(self, *, user_id: str, payloads: list[LocationIngest]) -> tuple[int, int]:
@@ -48,7 +50,5 @@ class LocationIngestionService:
                 accepted += 1
             except LocationQueueFull:
                 rejected += 1
+        logger.info("ingested batch user_id=%s accepted=%s rejected=%s", user_id, accepted, rejected)
         return accepted, rejected
-
-
-import asyncio

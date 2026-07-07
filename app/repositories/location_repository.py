@@ -19,7 +19,7 @@ class LocationRepository:
             return
         statement = insert(DeviceLocation).values(rows)
         upsert_statement = statement.on_conflict_do_update(
-            index_elements=[DeviceLocation.device_id],
+            index_elements=[DeviceLocation.user_id, DeviceLocation.device_id],
             set_={
                 "location": statement.excluded.location,
                 "latitude": statement.excluded.latitude,
@@ -30,8 +30,11 @@ class LocationRepository:
         )
         await session.execute(upsert_statement)
 
-    def build_location_row(self, *, device_id: str, latitude: float, longitude: float, reported_at: datetime) -> dict:
+    def build_location_row(
+        self, *, user_id: str, device_id: str, latitude: float, longitude: float, reported_at: datetime
+    ) -> dict:
         return {
+            "user_id": user_id,
             "device_id": device_id,
             "location": _point_wkt(latitude, longitude),
             "latitude": latitude,

@@ -28,6 +28,7 @@ async def run_location_worker(
         nonlocal pending
         if not pending:
             return
+        started = loop.time()
         grouped: dict[str, list] = defaultdict(list)
         for item in pending:
             grouped[item.user_id].append(item.payload)
@@ -40,6 +41,8 @@ async def run_location_worker(
                 except Exception:
                     await session.rollback()
                     logger.exception("location batch processing failed for user_id=%s", user_id)
+        elapsed_ms = (loop.time() - started) * 1000.0
+        logger.info("flushed location batch events=%s users=%s duration_ms=%.2f", sum(len(items) for items in grouped.values()), len(grouped), elapsed_ms)
 
     while True:
         timeout = None if deadline is None else max(0.0, deadline - loop.time())

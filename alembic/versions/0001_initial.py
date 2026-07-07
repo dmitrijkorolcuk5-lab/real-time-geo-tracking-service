@@ -36,7 +36,8 @@ def upgrade() -> None:
 
     op.create_table(
         "latest_device_locations",
-        sa.Column("device_id", sa.String(), primary_key=True),
+        sa.Column("user_id", sa.String(), primary_key=True, nullable=False),
+        sa.Column("device_id", sa.String(), primary_key=True, nullable=False),
         sa.Column("location", Geography(geometry_type="POINT", srid=4326), nullable=False),
         sa.Column("latitude", sa.Float(), nullable=False),
         sa.Column("longitude", sa.Float(), nullable=False),

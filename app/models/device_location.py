@@ -12,6 +12,7 @@ from app.db.base import Base
 class DeviceLocation(Base):
     __tablename__ = "latest_device_locations"
 
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
     device_id: Mapped[str] = mapped_column(String, primary_key=True)
     location: Mapped[object] = mapped_column(Geography(geometry_type="POINT", srid=4326), nullable=False)
     latitude: Mapped[float] = mapped_column(Float, nullable=False)

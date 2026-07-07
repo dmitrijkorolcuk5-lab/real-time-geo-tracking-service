@@ -50,3 +50,36 @@ async def test_websocket_manager_supports_multiple_sessions_per_user() -> None:
 
     await manager.disconnect(session1)
     await manager.disconnect(session2)
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_does_not_leak_messages_across_users() -> None:
+    manager = WebsocketManager(update_queue_size=10, alert_queue_size=10)
+    ws1 = FakeWebSocket()
+    ws2 = FakeWebSocket()
+
+    session1 = await manager.connect(ws1, user_id="user-123")
+    session2 = await manager.connect(ws2, user_id="user-456")
+
+    await manager.broadcast_alert(
+        "user-123",
+        {
+            "type": "geozone_alert",
+            "user_id": "user-123",
+            "device_id": "device-1",
+            "geozone_id": "zone-1",
+            "geozone_name": "Zone",
+            "latitude": 1.0,
+            "longitude": 2.0,
+            "timestamp": "2026-07-06T12:00:00Z",
+        },
+    )
+
+    await asyncio.sleep(0.05)
+
+    assert ws1.sent
+    assert any(message["type"] == "geozone_alert" for message in ws1.sent)
+    assert ws2.sent == []
+
+    await manager.disconnect(session1)
+    await manager.disconnect(session2)
