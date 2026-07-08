@@ -1,14 +1,12 @@
-from __future__ import annotations
-
-from typing import Iterable
 from uuid import UUID
 
 from geoalchemy2 import Geography, Geometry
 from geoalchemy2.elements import WKTElement
-from sqlalchemy import and_, cast, func, select
+from sqlalchemy import DateTime, Float, String, and_, cast, column, func, select, values
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.geozone import Geozone
+from app.schemas.location import LocationQueueItem
 
 
 def _point_wkt(latitude: float, longitude: float) -> WKTElement:
@@ -27,6 +25,22 @@ def _read_statement() -> select:
         Geozone.is_active,
         Geozone.created_at,
         Geozone.updated_at,
+    )
+
+
+def _build_incoming_locations_table(locations: list[LocationQueueItem]):
+    return values(
+        column("user_id", String),
+        column("device_id", String),
+        column("latitude", Float),
+        column("longitude", Float),
+        column("timestamp", DateTime(timezone=True)),
+        name="incoming_locations",
+    ).data(
+        [
+            (location.user_id, location.device_id, location.latitude, location.longitude, location.timestamp)
+            for location in locations
+        ]
     )
 
 
@@ -110,4 +124,47 @@ class GeozoneRepository:
     ) -> list[Geozone]:
         result = await session.execute(self.build_matching_statement(user_id=user_id, latitude=latitude, longitude=longitude))
         return list(result.scalars().all())
+
+    async def find_matching_geozones_for_locations(
+        self, session: AsyncSession, *, locations: list[LocationQueueItem]
+    ) -> list[tuple[LocationQueueItem, Geozone]]:
+        if not locations:
+            return []
+
+        incoming_locations = _build_incoming_locations_table(locations).alias("incoming_locations")
+        point = cast(
+            func.ST_SetSRID(func.ST_MakePoint(incoming_locations.c.longitude, incoming_locations.c.latitude), 4326),
+            Geography(geometry_type="POINT", srid=4326),
+        )
+        statement = select(
+            Geozone,
+            incoming_locations.c.user_id,
+            incoming_locations.c.device_id,
+            incoming_locations.c.latitude,
+            incoming_locations.c.longitude,
+            incoming_locations.c.timestamp,
+        ).join(
+            incoming_locations,
+            and_(
+                Geozone.user_id == incoming_locations.c.user_id,
+                Geozone.is_active.is_(True),
+                func.ST_DWithin(Geozone.center, point, Geozone.radius_m),
+            ),
+        )
+        result = await session.execute(statement)
+        matches: list[tuple[LocationQueueItem, Geozone]] = []
+        for geozone, user_id, device_id, latitude, longitude, timestamp in result.all():
+            matches.append(
+                (
+                    LocationQueueItem(
+                        user_id=user_id,
+                        device_id=device_id,
+                        latitude=latitude,
+                        longitude=longitude,
+                        timestamp=timestamp,
+                    ),
+                    geozone,
+                )
+            )
+        return matches
 

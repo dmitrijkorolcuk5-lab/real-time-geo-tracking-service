@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 router = APIRouter(prefix="/ws", tags=["websocket"])

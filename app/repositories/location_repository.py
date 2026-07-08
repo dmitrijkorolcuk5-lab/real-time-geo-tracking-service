@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from datetime import datetime, timezone
 
 from geoalchemy2.elements import WKTElement

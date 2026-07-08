@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 
 from app.api.deps import get_location_ingestion_service

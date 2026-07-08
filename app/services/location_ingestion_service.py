@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 import asyncio
+import hashlib
 from dataclasses import dataclass
 
 from app.core.logging import get_logger
@@ -11,7 +10,6 @@ logger = get_logger(__name__)
 
 @dataclass(slots=True, frozen=True)
 class QueuedLocation:
-    user_id: str
     payload: LocationQueueItem
 
 
@@ -19,23 +17,33 @@ class LocationQueueFull(Exception):
     pass
 
 
+def compute_location_shard(user_id: str, device_id: str, worker_count: int) -> int:
+    if worker_count < 1:
+        raise ValueError("worker_count must be at least 1")
+    digest = hashlib.sha256(f"{user_id}:{device_id}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % worker_count
+
+
 class LocationIngestionService:
-    def __init__(self, queue) -> None:
-        self.queue = queue
+    def __init__(self, queues: list[asyncio.Queue[QueuedLocation]]) -> None:
+        self.queues = queues
 
     async def enqueue(self, *, user_id: str, payload: LocationIngest) -> None:
+        if not self.queues:
+            raise ValueError("at least one location queue is required")
         item = QueuedLocation(
-            user_id=user_id,
             payload=LocationQueueItem(
                 user_id=user_id,
                 device_id=payload.device_id,
                 latitude=payload.latitude,
                 longitude=payload.longitude,
                 timestamp=payload.timestamp,
-            ),
+            )
         )
+        shard_index = compute_location_shard(user_id, payload.device_id, len(self.queues))
+        queue = self.queues[shard_index]
         try:
-            self.queue.put_nowait(item)
+            queue.put_nowait(item)
             logger.debug("accepted location update user_id=%s device_id=%s", user_id, payload.device_id)
         except asyncio.QueueFull as exc:
             logger.warning("rejected location update due to full queue user_id=%s device_id=%s", user_id, payload.device_id)

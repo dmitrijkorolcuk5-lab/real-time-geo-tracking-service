@@ -1,10 +1,12 @@
-from __future__ import annotations
-
 import asyncio
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
-from app.services.websocket_manager import WebsocketManager
+from app.api.v1.websocket import router as websocket_router
+from app.services.websocket_manager import ManagedSession, WebsocketManager
 
 
 class FakeWebSocket:
@@ -21,6 +23,18 @@ class FakeWebSocket:
 
     async def close(self, code: int | None = None) -> None:
         self.closed = True
+
+
+def test_websocket_endpoint_rejects_missing_user_id() -> None:
+    app = FastAPI()
+    app.include_router(websocket_router)
+    client = TestClient(app)
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/ws"):
+            pass
+
+    assert exc_info.value.code == 1008
 
 
 @pytest.mark.asyncio
@@ -50,6 +64,24 @@ async def test_websocket_manager_supports_multiple_sessions_per_user() -> None:
 
     await manager.disconnect(session1)
     await manager.disconnect(session2)
+
+
+@pytest.mark.asyncio
+async def test_websocket_manager_drops_stale_location_update_when_queue_is_full() -> None:
+    manager = WebsocketManager(update_queue_size=1, alert_queue_size=1)
+    session = ManagedSession(
+        websocket=FakeWebSocket(),
+        user_id="user-123",
+        update_queue=asyncio.Queue(maxsize=1),
+        alert_queue=asyncio.Queue(maxsize=1),
+    )
+    manager._sessions["user-123"].add(session)
+
+    await manager.broadcast_location("user-123", {"type": "location_update", "device_id": "old"})
+    await manager.broadcast_location("user-123", {"type": "location_update", "device_id": "new"})
+
+    assert session.update_queue.qsize() == 1
+    assert session.update_queue.get_nowait()["device_id"] == "new"
 
 
 @pytest.mark.asyncio

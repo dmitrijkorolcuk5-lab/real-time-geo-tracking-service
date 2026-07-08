@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -19,6 +17,10 @@ from app.workers.location_worker import run_location_worker
 from app.workers.redis_subscriber import run_redis_subscriber
 
 logger = get_logger(__name__)
+
+
+def build_location_queues(worker_count: int, queue_maxsize: int) -> list[asyncio.Queue]:
+    return [asyncio.Queue(maxsize=queue_maxsize) for _ in range(worker_count)]
 
 
 async def _wait_for_database(engine, attempts: int = 30, delay_seconds: float = 1.0) -> None:
@@ -48,8 +50,8 @@ async def lifespan(app: FastAPI):
         alert_queue_size=settings.websocket_alert_queue_size,
     )
     redis_bus = RedisBus(redis)
-    location_queue: asyncio.Queue = asyncio.Queue(maxsize=settings.queue_maxsize)
-    location_ingestion_service = LocationIngestionService(location_queue)
+    location_queues = build_location_queues(settings.location_worker_count, settings.queue_maxsize)
+    location_ingestion_service = LocationIngestionService(location_queues)
     geozone_service = GeozoneService()
     location_processor = LocationProcessor(redis_bus=redis_bus)
 
@@ -59,23 +61,28 @@ async def lifespan(app: FastAPI):
     app.state.redis = redis
     app.state.websocket_manager = websocket_manager
     app.state.redis_bus = redis_bus
-    app.state.location_queue = location_queue
+    app.state.location_queue = location_queues[0] if location_queues else None
+    app.state.location_queues = location_queues
     app.state.location_ingestion_service = location_ingestion_service
     app.state.geozone_service = geozone_service
 
-    worker_task = asyncio.create_task(
-        run_location_worker(
-            queue=location_queue,
-            session_factory=session_factory,
-            processor=location_processor,
-            batch_size=settings.batch_max_size,
-            flush_interval_seconds=settings.batch_flush_interval_seconds,
+    worker_tasks = [
+        asyncio.create_task(
+            run_location_worker(
+                queue=queue,
+                session_factory=session_factory,
+                processor=location_processor,
+                batch_size=settings.batch_max_size,
+                flush_interval_seconds=settings.batch_flush_interval_seconds,
+                worker_id=index,
+            )
         )
-    )
+        for index, queue in enumerate(location_queues)
+    ]
     subscriber_task = asyncio.create_task(
         run_redis_subscriber(redis=redis, websocket_manager=websocket_manager)
     )
-    app.state.background_tasks = [worker_task, subscriber_task]
+    app.state.background_tasks = [*worker_tasks, subscriber_task]
 
     try:
         yield

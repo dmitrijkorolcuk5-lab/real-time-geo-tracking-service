@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -26,29 +24,31 @@ class LocationProcessor:
         self.alert_service = alert_service or AlertService()
         self.redis_bus = redis_bus
 
-    async def process_batch(self, session: AsyncSession, items: list[tuple[str, LocationQueueItem]]) -> None:
+    async def process_batch(self, session: AsyncSession, items: list[LocationQueueItem]) -> None:
         if not items:
             return
-        latest_by_device: dict[tuple[str, str], tuple[str, LocationQueueItem]] = {}
-        for user_id, location in items:
-            key = (user_id, location.device_id)
+        latest_by_device: dict[tuple[str, str], LocationQueueItem] = {}
+        for location in items:
+            key = (location.user_id, location.device_id)
             current = latest_by_device.get(key)
-            if current is None or location.timestamp >= current[1].timestamp:
-                latest_by_device[key] = (user_id, location)
+            if current is None or location.timestamp >= current.timestamp:
+                latest_by_device[key] = location
+
+        deduplicated_locations = list(latest_by_device.values())
 
         rows = [
             self.location_repository.build_location_row(
-                user_id=user_id,
+                user_id=location.user_id,
                 device_id=location.device_id,
                 latitude=location.latitude,
                 longitude=location.longitude,
                 reported_at=location.timestamp,
             )
-            for user_id, location in latest_by_device.values()
+            for location in deduplicated_locations
         ]
         await self.location_repository.bulk_upsert_latest_locations(session, rows)
 
-        for user_id, location in latest_by_device.values():
+        for location in deduplicated_locations:
             location_payload = {
                 "type": "location_update",
                 "device_id": location.device_id,
@@ -57,23 +57,22 @@ class LocationProcessor:
                 "timestamp": location.timestamp,
             }
             if self.redis_bus is not None:
-                await self.redis_bus.publish({"event_type": "location_update", "user_id": user_id, "payload": location_payload})
-            matched = await self.geozone_repository.find_matching_geozones(
-                session,
-                user_id=user_id,
-                latitude=location.latitude,
-                longitude=location.longitude,
-            )
+                await self.redis_bus.publish({"event_type": "location_update", "user_id": location.user_id, "payload": location_payload})
+
+        matched_geozones = await self.geozone_repository.find_matching_geozones_for_locations(
+            session,
+            locations=deduplicated_locations,
+        )
+        for location, geozone in matched_geozones:
             logger.info(
                 "geozone matches found user_id=%s device_id=%s count=%s",
-                user_id,
+                location.user_id,
                 location.device_id,
-                len(matched),
+                1,
             )
-            for geozone in matched:
-                alert_payload = self.alert_service.build_alert_payload(user_id=user_id, geozone=geozone, location=location)
-                if self.redis_bus is not None:
-                    await self.redis_bus.publish({"event_type": "geozone_alert", "user_id": user_id, "payload": alert_payload})
+            alert_payload = self.alert_service.build_alert_payload(user_id=location.user_id, geozone=geozone, location=location)
+            if self.redis_bus is not None:
+                await self.redis_bus.publish({"event_type": "geozone_alert", "user_id": location.user_id, "payload": alert_payload})
 
         await session.commit()
 

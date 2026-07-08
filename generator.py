@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import asyncio
 import random
@@ -68,15 +66,39 @@ async def send_batch(client: httpx.AsyncClient, api_url: str, user_id: str, batc
     return response.status_code < 400
 
 
-async def send_batch_limited(
-    semaphore: asyncio.Semaphore,
+async def send_batches_with_limit(
     client: httpx.AsyncClient,
     api_url: str,
     user_id: str,
-    batch: list[DeviceState],
-) -> bool:
-    async with semaphore:
-        return await send_batch(client, api_url, user_id, batch)
+    batches: list[list[DeviceState]],
+    concurrency: int,
+) -> tuple[int, int]:
+    queue: asyncio.Queue[list[DeviceState]] = asyncio.Queue()
+    for batch in batches:
+        queue.put_nowait(batch)
+
+    async def worker() -> tuple[int, int]:
+        requests = 0
+        failures = 0
+        while True:
+            try:
+                batch = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return requests, failures
+            try:
+                ok = await send_batch(client, api_url, user_id, batch)
+                requests += 1
+                if not ok:
+                    failures += 1
+            except Exception:
+                requests += 1
+                failures += 1
+            finally:
+                queue.task_done()
+
+    worker_count = min(max(1, concurrency), max(1, len(batches)))
+    results = await asyncio.gather(*(worker() for _ in range(worker_count)))
+    return sum(requests for requests, _ in results), sum(failures for _, failures in results)
 
 
 async def run_generator(args: argparse.Namespace) -> None:
@@ -84,22 +106,20 @@ async def run_generator(args: argparse.Namespace) -> None:
     total_sent = 0
     total_failed = 0
     tick = 0
-    semaphore = asyncio.Semaphore(max(1, args.concurrency))
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
             tick += 1
             started = time.perf_counter()
             for device in devices:
                 drift_device(device)
-            requests = 0
-            failures = 0
-            tasks = []
-            for batch in chunked(devices, args.batch_size):
-                tasks.append(asyncio.create_task(send_batch_limited(semaphore, client, args.api_url, args.user_id, batch)))
-            for result in await asyncio.gather(*tasks, return_exceptions=True):
-                requests += 1
-                if isinstance(result, Exception) or result is False:
-                    failures += 1
+            batches = list(chunked(devices, args.batch_size))
+            requests, failures = await send_batches_with_limit(
+                client,
+                args.api_url,
+                args.user_id,
+                batches,
+                args.concurrency,
+            )
             total_sent += len(devices)
             total_failed += failures * args.batch_size
             elapsed = max(time.perf_counter() - started, 0.001)

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from datetime import datetime, timezone
 
@@ -8,7 +6,7 @@ from sqlalchemy.dialects import postgresql
 
 from app.repositories.location_repository import LocationRepository
 from app.schemas.location import LocationIngest, LocationQueueItem
-from app.services.location_ingestion_service import LocationIngestionService, LocationQueueFull
+from app.services.location_ingestion_service import LocationIngestionService, LocationQueueFull, compute_location_shard
 from app.services.location_processor import LocationProcessor
 
 
@@ -40,7 +38,7 @@ class RecordingLocationRepository:
 
 
 class NoopGeozoneRepository:
-    async def find_matching_geozones(self, session, *, user_id: str, latitude: float, longitude: float):
+    async def find_matching_geozones_for_locations(self, session, *, locations):
         return []
 
 
@@ -89,35 +87,26 @@ async def test_location_processor_deduplicates_by_user_and_device() -> None:
     await processor.process_batch(
         session,
         [
-            (
-                "user-a",
-                LocationQueueItem(
-                    user_id="user-a",
-                    device_id="device-shared",
-                    latitude=49.0,
-                    longitude=24.0,
-                    timestamp=first_timestamp,
-                ),
+            LocationQueueItem(
+                user_id="user-a",
+                device_id="device-shared",
+                latitude=49.0,
+                longitude=24.0,
+                timestamp=first_timestamp,
             ),
-            (
-                "user-b",
-                LocationQueueItem(
-                    user_id="user-b",
-                    device_id="device-shared",
-                    latitude=50.0,
-                    longitude=25.0,
-                    timestamp=later_timestamp,
-                ),
+            LocationQueueItem(
+                user_id="user-b",
+                device_id="device-shared",
+                latitude=50.0,
+                longitude=25.0,
+                timestamp=later_timestamp,
             ),
-            (
-                "user-a",
-                LocationQueueItem(
-                    user_id="user-a",
-                    device_id="device-shared",
-                    latitude=49.5,
-                    longitude=24.5,
-                    timestamp=even_later_timestamp,
-                ),
+            LocationQueueItem(
+                user_id="user-a",
+                device_id="device-shared",
+                latitude=49.5,
+                longitude=24.5,
+                timestamp=even_later_timestamp,
             ),
         ],
     )
@@ -131,7 +120,7 @@ async def test_location_processor_deduplicates_by_user_and_device() -> None:
 @pytest.mark.asyncio
 async def test_location_ingestion_service_rejects_when_queue_is_full() -> None:
     queue = asyncio.Queue(maxsize=1)
-    service = LocationIngestionService(queue)
+    service = LocationIngestionService([queue])
     payload = LocationIngest(
         device_id="device-1",
         latitude=49.0,
@@ -143,3 +132,91 @@ async def test_location_ingestion_service_rejects_when_queue_is_full() -> None:
 
     with pytest.raises(LocationQueueFull):
         await service.enqueue(user_id="user-1", payload=payload)
+
+
+def test_location_shard_is_deterministic() -> None:
+    worker_count = 4
+    first = compute_location_shard("user-1", "device-1", worker_count)
+    second = compute_location_shard("user-1", "device-1", worker_count)
+    shard_set = {compute_location_shard(f"user-{index}", "device-1", worker_count) for index in range(8)}
+
+    assert first == second
+    assert 0 <= first < worker_count
+    assert len(shard_set) > 1
+
+
+@pytest.mark.asyncio
+async def test_location_ingestion_routes_same_user_device_pair_to_same_shard() -> None:
+    queues = [asyncio.Queue() for _ in range(4)]
+    service = LocationIngestionService(queues)
+    payload = LocationIngest(
+        device_id="device-1",
+        latitude=49.0,
+        longitude=24.0,
+        timestamp=datetime.now(timezone.utc),
+    )
+    shard_index = compute_location_shard("user-1", "device-1", len(queues))
+
+    await service.enqueue(user_id="user-1", payload=payload)
+    await service.enqueue(user_id="user-1", payload=payload)
+
+    assert queues[shard_index].qsize() == 2
+    assert sum(queue.qsize() for queue in queues) == 2
+
+
+@pytest.mark.asyncio
+async def test_location_processor_calls_batch_matching_once_and_keeps_users_isolated() -> None:
+    class RecordingGeozone:
+        id = "zone-1"
+        name = "Warehouse"
+
+    class RecordingRedisBus:
+        def __init__(self) -> None:
+            self.events = []
+
+        async def publish(self, event: dict) -> None:
+            self.events.append(event)
+
+    class RecordingGeozoneRepository:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.locations = []
+
+        async def find_matching_geozones_for_locations(self, session, *, locations):
+            self.calls += 1
+            self.locations = list(locations)
+            return [(location, RecordingGeozone()) for location in locations if location.user_id == "user-1"]
+
+    geozone_repository = RecordingGeozoneRepository()
+    redis_bus = RecordingRedisBus()
+    processor = LocationProcessor(
+        geozone_repository=geozone_repository,
+        location_repository=RecordingLocationRepository(),
+        redis_bus=redis_bus,
+    )
+    session = NoopSession()
+    timestamp = datetime(2026, 7, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+    await processor.process_batch(
+        session,
+        [
+            LocationQueueItem(
+                user_id="user-1",
+                device_id="device-shared",
+                latitude=49.0,
+                longitude=24.0,
+                timestamp=timestamp,
+            ),
+            LocationQueueItem(
+                user_id="user-2",
+                device_id="device-shared",
+                latitude=50.0,
+                longitude=25.0,
+                timestamp=timestamp,
+            ),
+        ],
+    )
+
+    assert geozone_repository.calls == 1
+    assert len(geozone_repository.locations) == 2
+    assert [event["user_id"] for event in redis_bus.events if event["event_type"] == "geozone_alert"] == ["user-1"]

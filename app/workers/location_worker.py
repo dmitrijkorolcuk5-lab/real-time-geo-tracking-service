@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 import asyncio
-from collections import defaultdict
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -19,30 +16,30 @@ async def run_location_worker(
     processor: LocationProcessor,
     batch_size: int,
     flush_interval_seconds: float,
+    worker_id: int | None = None,
 ) -> None:
     pending: list[QueuedLocation] = []
     deadline: float | None = None
     loop = asyncio.get_running_loop()
+    worker_label = f"worker-{worker_id}" if worker_id is not None else "worker"
 
     async def flush_pending() -> None:
         nonlocal pending
         if not pending:
             return
         started = loop.time()
-        grouped: dict[str, list] = defaultdict(list)
-        for item in pending:
-            grouped[item.user_id].append(item.payload)
+        batch = [item.payload for item in pending]
         pending = []
 
         async with session_factory() as session:
-            for user_id, payloads in grouped.items():
-                try:
-                    await processor.process_batch(session, [(user_id, payload) for payload in payloads])
-                except Exception:
-                    await session.rollback()
-                    logger.exception("location batch processing failed for user_id=%s", user_id)
+            try:
+                await processor.process_batch(session, batch)
+            except Exception:
+                await session.rollback()
+                logger.exception("location batch processing failed worker=%s", worker_label)
+                raise
         elapsed_ms = (loop.time() - started) * 1000.0
-        logger.info("flushed location batch events=%s users=%s duration_ms=%.2f", sum(len(items) for items in grouped.values()), len(grouped), elapsed_ms)
+        logger.info("flushed location batch worker=%s events=%s duration_ms=%.2f", worker_label, len(batch), elapsed_ms)
 
     while True:
         timeout = None if deadline is None else max(0.0, deadline - loop.time())

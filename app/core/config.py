@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     queue_maxsize: int = Field(default=10000, alias="QUEUE_MAXSIZE")
     batch_max_size: int = Field(default=500, alias="BATCH_MAX_SIZE")
     batch_flush_interval_seconds: float = Field(default=1.0, alias="BATCH_FLUSH_INTERVAL_SECONDS")
+    location_worker_count: int = Field(default=4, alias="LOCATION_WORKER_COUNT")
     websocket_update_queue_size: int = Field(default=512, alias="WEBSOCKET_UPDATE_QUEUE_SIZE")
     websocket_alert_queue_size: int = Field(default=512, alias="WEBSOCKET_ALERT_QUEUE_SIZE")
 

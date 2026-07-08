@@ -15,10 +15,10 @@ FastAPI backend for ingesting device locations in real time, matching them again
 
 ```text
 HTTP clients -> FastAPI validation
-             -> bounded asyncio queue
-             -> batch worker
+             -> sharded bounded asyncio queues
+             -> multiple batch workers
              -> bulk upsert latest_device_locations
-             -> PostGIS geozone matching
+             -> batch PostGIS geozone matching
              -> Redis Pub/Sub
              -> WebSocket manager
              -> multiple sessions per user
@@ -47,6 +47,13 @@ cp .env.example .env
 Then start the stack:
 
 ```bash
+docker compose up --build
+```
+
+The stack reads all credentials and environment-specific values from `.env`. The example file includes PostgreSQL, Redis, API, queue, and worker settings. A clean local startup looks like this:
+
+```bash
+cp .env.example .env
 docker compose up --build
 ```
 
@@ -88,6 +95,8 @@ curl http://localhost:8000/health
 
 The response reports API, database, Redis, and queue status.
 
+It now also reports the configured worker count, total queue size, and per-shard queue sizes.
+
 ## Create a Geozone
 
 ```bash
@@ -122,6 +131,10 @@ Use either the query parameter or the `X-User-Id` header:
 ```text
 ws://localhost:8000/api/v1/ws?user_id=user-123
 ```
+
+## Demo Page
+
+Open the Jinja demo at [http://localhost:8000/](http://localhost:8000/). It provides a simple server-rendered UI for connecting a WebSocket, entering a `user_id`, and watching location updates and geozone alerts stream in.
 
 Example message formats:
 
@@ -163,6 +176,18 @@ Useful options:
 - `--interval 3` sets the delay between ticks.
 - `--concurrency 20` caps the number of concurrent batch requests.
 - `--api-url http://localhost:8000` points the generator at the API.
+
+The generator is intentionally bounded by `--concurrency` so it can safely simulate 10,000 devices without opening unbounded concurrent requests.
+
+## Worker Sharding
+
+Location ingestion is sharded across `LOCATION_WORKER_COUNT` bounded queues. Each incoming event is routed by a stable SHA-256 hash of `(user_id, device_id)`, so the same device for the same user always lands on the same shard.
+
+This preserves per-device ordering as much as the queue allows while distributing load across multiple workers.
+
+## Batch Geozone Matching
+
+The worker now deduplicates the latest location per `(user_id, device_id)` and performs geozone matching with one batch query per processed batch. The repository uses a `VALUES` table joined against `geozones` with `ST_DWithin`, so the old N+1 query pattern is removed while keeping user isolation strict.
 
 ## User Isolation
 
